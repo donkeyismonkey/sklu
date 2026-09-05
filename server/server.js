@@ -1,22 +1,26 @@
-const express = require("express");
-const cors = require("cors");
-const http = require("http");
-const { Server } = require("socket.io");
+const express = require('express');
+const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 4000;
 
+// ============================================================
+// APP
+// ============================================================
+
 const app = express();
 
-app.use(cors({ origin: "*" }));
+app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
 });
 
 // ============================================================
@@ -25,7 +29,7 @@ const io = new Server(server, {
 
 const ARENA = {
   width: 3000,
-  height: 3000
+  height: 3000,
 };
 
 const TICK_HZ = 30;
@@ -34,13 +38,13 @@ const TICK_MS = 1000 / TICK_HZ;
 const BROADCAST_HZ = 20;
 const BROADCAST_MS = 1000 / BROADCAST_HZ;
 
+// REAL PLAYER + BOT LIMIT
 const MAX_PLAYERS_PER_ROOM = 40;
+const MAX_BOTS_PER_ROOM = 40;
 
+// Gameplay
 const PLAYER_RADIUS = 32;
-
-const PLAYER_SPEED = 255;
-const MIN_PLAYER_SPEED = 0;
-const MAX_PLAYER_SPEED = 2000;
+const PLAYER_SPEED = 400;
 
 const BONE_RADIUS = 18;
 const BONE_TARGET_COUNT = 60;
@@ -55,20 +59,44 @@ const RESPAWN_INVULN_MS = 1800;
 
 const MAX_NAME_LEN = 20;
 
+// Bot thinking
+const BOT_THINK_MIN_MS = 250;
+const BOT_THINK_MAX_MS = 650;
+
+// Admin key for bot controls.
+// Set this in your environment instead of leaving the default.
+const BOT_ADMIN_KEY =
+  process.env.BOT_ADMIN_KEY || 'change-this-key';
+
+// ============================================================
+// ROOM DATA
+// ============================================================
+
 const ROOM_NAMES = [
-  "Junkyard Prime",
-  "Rustbelt Court",
-  "The Bonepit",
-  "Alley Howl"
+  'Junkyard Prime',
+  'Rustbelt Court',
+  'The Bonepit',
+  'Alley Howl',
 ];
 
 const HAT_IDS = [
-  "none",
-  "party",
-  "crown",
-  "bandana",
-  "halo",
-  "tinfoil"
+  'none',
+  'party',
+  'crown',
+  'bandana',
+  'halo',
+  'tinfoil',
+];
+
+const BOT_COLORS = [
+  '#d97757',
+  '#4a90d9',
+  '#5fbf6f',
+  '#c23b3b',
+  '#e8a33d',
+  '#8e6bb5',
+  '#3a3a3a',
+  '#efe6d4',
 ];
 
 // ============================================================
@@ -84,72 +112,56 @@ function randRange(min, max) {
 }
 
 function sanitizeName(raw) {
-  if (typeof raw !== "string") {
-    return "Stray Dog";
+  if (typeof raw !== 'string') {
+    return 'Stray Dog';
   }
 
   const trimmed = raw
-    .replace(/[^\w \-'!?]/g, "")
+    .replace(/[^\w \-'!?]/g, '')
     .trim()
     .slice(0, MAX_NAME_LEN);
 
-  return trimmed.length ? trimmed : "Stray Dog";
+  return trimmed.length
+    ? trimmed
+    : 'Stray Dog';
 }
 
 function sanitizeColor(raw) {
   if (
-    typeof raw === "string" &&
+    typeof raw === 'string' &&
     /^#[0-9a-fA-F]{6}$/.test(raw)
   ) {
     return raw;
   }
 
-  return "#d97757";
+  return '#d97757';
 }
 
 function sanitizeHat(raw) {
-  return HAT_IDS.includes(raw) ? raw : "none";
+  return HAT_IDS.includes(raw)
+    ? raw
+    : 'none';
 }
 
-function cleanNumber(value, fallback = 0) {
-  const n = Number(value);
+function randomBotName(room) {
+  const used = new Set();
 
-  if (!Number.isFinite(n)) {
-    return fallback;
+  for (const player of room.players.values()) {
+    if (player.isBot) {
+      used.add(player.name);
+    }
   }
 
-  return n;
-}
+  for (let i = 1; i <= MAX_BOTS_PER_ROOM; i++) {
+    const name =
+      `Bot_${String(i).padStart(3, '0')}`;
 
-function rgbToHex(r, g, b) {
-  r = clamp(Math.floor(cleanNumber(r)), 0, 255);
-  g = clamp(Math.floor(cleanNumber(g)), 0, 255);
-  b = clamp(Math.floor(cleanNumber(b)), 0, 255);
-
-  return (
-    "#" +
-    [r, g, b]
-      .map(v => v.toString(16).padStart(2, "0"))
-      .join("")
-  );
-}
-
-function hexToRgb(hex) {
-  const clean = String(hex).replace("#", "");
-
-  if (!/^[0-9a-fA-F]{6}$/.test(clean)) {
-    return {
-      r: 217,
-      g: 119,
-      b: 87
-    };
+    if (!used.has(name)) {
+      return name;
+    }
   }
 
-  return {
-    r: parseInt(clean.substring(0, 2), 16),
-    g: parseInt(clean.substring(2, 4), 16),
-    b: parseInt(clean.substring(4, 6), 16)
-  };
+  return `Bot_${Math.floor(Math.random() * 99999)}`;
 }
 
 // ============================================================
@@ -157,9 +169,14 @@ function hexToRgb(hex) {
 // ============================================================
 
 class Room {
+
   constructor(id, index) {
+
     this.id = id;
-    this.name = ROOM_NAMES[index] || `Server ${index + 1}`;
+
+    this.name =
+      ROOM_NAMES[index] ||
+      `Server ${index + 1}`;
 
     this.players = new Map();
 
@@ -167,30 +184,36 @@ class Room {
 
     this.nextBoneId = 1;
 
-    for (let i = 0; i < BONE_TARGET_COUNT; i++) {
+    for (
+      let i = 0;
+      i < BONE_TARGET_COUNT;
+      i++
+    ) {
       this.spawnBone();
     }
   }
 
   // ----------------------------------------------------------
-  // BONES
+  // BONE
   // ----------------------------------------------------------
 
   spawnBone() {
-    const id = "b" + this.nextBoneId++;
+
+    const id =
+      'b' + this.nextBoneId++;
 
     const bone = {
       id,
 
       x: randRange(
-        BONE_RADIUS,
-        ARENA.width - BONE_RADIUS
+        PLAYER_RADIUS,
+        ARENA.width - PLAYER_RADIUS
       ),
 
       y: randRange(
-        BONE_RADIUS,
-        ARENA.height - BONE_RADIUS
-      )
+        PLAYER_RADIUS,
+        ARENA.height - PLAYER_RADIUS
+      ),
     };
 
     this.bones.set(id, bone);
@@ -198,42 +221,8 @@ class Room {
     return bone;
   }
 
-  dropBonesAt(x, y, count) {
-    count = clamp(
-      Math.floor(cleanNumber(count)),
-      0,
-      500
-    );
-
-    for (let i = 0; i < count; i++) {
-      const id = "b" + this.nextBoneId++;
-
-      const angle =
-        Math.random() * Math.PI * 2;
-
-      const distance =
-        randRange(10, 90);
-
-      this.bones.set(id, {
-        id,
-
-        x: clamp(
-          x + Math.cos(angle) * distance,
-          BONE_RADIUS,
-          ARENA.width - BONE_RADIUS
-        ),
-
-        y: clamp(
-          y + Math.sin(angle) * distance,
-          BONE_RADIUS,
-          ARENA.height - BONE_RADIUS
-        )
-      });
-    }
-  }
-
   // ----------------------------------------------------------
-  // PLAYERS
+  // PLAYER
   // ----------------------------------------------------------
 
   addPlayer(
@@ -243,16 +232,14 @@ class Room {
     hat,
     isBot = false
   ) {
-    const safeColor = sanitizeColor(color);
 
     const player = {
+
       id: socketId,
 
       name: sanitizeName(name),
 
-      color: safeColor,
-
-      rgb: hexToRgb(safeColor),
+      color: sanitizeColor(color),
 
       hat: sanitizeHat(hat),
 
@@ -269,6 +256,7 @@ class Room {
       ),
 
       dx: 0,
+
       dy: 0,
 
       facing: 0,
@@ -286,12 +274,9 @@ class Room {
 
       kills: 0,
 
+      // Bot-only data
       botThinkAt: 0,
-
       botTargetId: null,
-
-      // OWNER CONTROL
-      speed: PLAYER_SPEED
     };
 
     this.players.set(
@@ -306,7 +291,12 @@ class Room {
     this.players.delete(socketId);
   }
 
+  // ----------------------------------------------------------
+  // RESPAWN
+  // ----------------------------------------------------------
+
   respawn(player) {
+
     player.x = randRange(
       200,
       ARENA.width - 200
@@ -337,76 +327,142 @@ class Room {
   }
 
   // ----------------------------------------------------------
-  // BOT AI
+  // DROP BONES
   // ----------------------------------------------------------
 
-  updateBots(now) {
-    for (const bot of this.players.values()) {
-      if (!bot.isBot) continue;
-      if (!bot.alive) continue;
+  dropBonesAt(x, y, count) {
 
-      if (now < bot.botThinkAt) {
+    for (
+      let i = 0;
+      i < count;
+      i++
+    ) {
+
+      const id =
+        'b' + this.nextBoneId++;
+
+      const angle =
+        Math.random() * Math.PI * 2;
+
+      const distance =
+        randRange(10, 90);
+
+      this.bones.set(id, {
+
+        id,
+
+        x: clamp(
+          x + Math.cos(angle) * distance,
+          BONE_RADIUS,
+          ARENA.width - BONE_RADIUS
+        ),
+
+        y: clamp(
+          y + Math.sin(angle) * distance,
+          BONE_RADIUS,
+          ARENA.height - BONE_RADIUS
+        ),
+
+      });
+    }
+  }
+
+  // ==========================================================
+  // BOT AI
+  // ==========================================================
+
+  updateBots(now) {
+
+    for (const bot of this.players.values()) {
+
+      if (!bot.isBot)
         continue;
-      }
+
+      if (!bot.alive)
+        continue;
+
+      // Keep existing movement between thoughts.
+      if (now < bot.botThinkAt)
+        continue;
 
       bot.botThinkAt =
         now +
-        250 +
-        Math.random() * 400;
+        randRange(
+          BOT_THINK_MIN_MS,
+          BOT_THINK_MAX_MS
+        );
 
       let target = null;
       let closestDistance = Infinity;
 
-      // Find closest bone
-      for (const bone of this.bones.values()) {
-        const distance = Math.hypot(
-          bot.x - bone.x,
-          bot.y - bone.y
-        );
+      // ------------------------------------------------------
+      // Find nearest bone
+      // ------------------------------------------------------
 
-        if (distance < closestDistance) {
+      for (const bone of this.bones.values()) {
+
+        const distance =
+          Math.hypot(
+            bot.x - bone.x,
+            bot.y - bone.y
+          );
+
+        if (
+          distance < closestDistance
+        ) {
+
           closestDistance = distance;
+
           target = bone;
         }
       }
 
-      // Sometimes chase a real player
+      // ------------------------------------------------------
+      // Sometimes hunt a human player
+      // ------------------------------------------------------
+
       if (Math.random() < 0.40) {
+
         let closestPlayer = null;
         let closestPlayerDistance =
           Infinity;
 
-        for (const player of this.players.values()) {
-          if (player.id === bot.id) {
+        for (
+          const player
+          of this.players.values()
+        ) {
+
+          if (
+            player.id === bot.id ||
+            player.isBot ||
+            !player.alive
+          ) {
             continue;
           }
 
-          if (player.isBot) {
-            continue;
-          }
-
-          if (!player.alive) {
-            continue;
-          }
-
-          const distance = Math.hypot(
-            bot.x - player.x,
-            bot.y - player.y
-          );
+          const distance =
+            Math.hypot(
+              bot.x - player.x,
+              bot.y - player.y
+            );
 
           if (
             distance <
             closestPlayerDistance
           ) {
+
             closestPlayerDistance =
               distance;
 
-            closestPlayer = player;
+            closestPlayer =
+              player;
           }
         }
 
         if (closestPlayer) {
-          target = closestPlayer;
+
+          target =
+            closestPlayer;
 
           closestDistance =
             closestPlayerDistance;
@@ -416,15 +472,26 @@ class Room {
         }
       }
 
+      // ------------------------------------------------------
+      // No target
+      // ------------------------------------------------------
+
       if (!target) {
+
         bot.dx =
           Math.random() * 2 - 1;
 
         bot.dy =
           Math.random() * 2 - 1;
 
+        bot.botTargetId = null;
+
         continue;
       }
+
+      // ------------------------------------------------------
+      // Move toward target
+      // ------------------------------------------------------
 
       const dx =
         target.x - bot.x;
@@ -436,6 +503,7 @@ class Room {
         Math.hypot(dx, dy);
 
       if (distance > 0.001) {
+
         bot.dx =
           dx / distance;
 
@@ -449,20 +517,25 @@ class Room {
           );
       }
 
+      // ------------------------------------------------------
+      // Bite humans
+      // ------------------------------------------------------
+
       if (
         !target.isBot &&
         distance <= BITE_RANGE
       ) {
+
         const result =
           this.handleBite(bot.id);
 
         if (
           result &&
-          result.event &&
-          result.target
+          result.event
         ) {
+
           io.to(this.id).emit(
-            "event",
+            'event',
             {
               type: result.event,
 
@@ -470,7 +543,7 @@ class Room {
                 result.attacker.name,
 
               target:
-                result.target.name
+                result.target.name,
             }
           );
         }
@@ -478,20 +551,29 @@ class Room {
     }
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // GAME TICK
-  // ----------------------------------------------------------
+  // ==========================================================
 
   tick(dtSec) {
-    const now = Date.now();
 
+    const now =
+      Date.now();
+
+    // Bots decide what they want to do.
     this.updateBots(now);
 
-    // Movement
-    for (const player of this.players.values()) {
-      if (!player.alive) {
+    // --------------------------------------------------------
+    // MOVEMENT
+    // --------------------------------------------------------
+
+    for (
+      const player
+      of this.players.values()
+    ) {
+
+      if (!player.alive)
         continue;
-      }
 
       const magnitude =
         Math.hypot(
@@ -500,50 +582,69 @@ class Room {
         );
 
       if (magnitude > 0.001) {
+
         const nx =
           player.dx / magnitude;
 
         const ny =
           player.dy / magnitude;
 
-        player.x = clamp(
-          player.x +
-            nx *
-              player.speed *
+        player.x =
+          clamp(
+            player.x +
+              nx *
+              PLAYER_SPEED *
               dtSec,
 
-          PLAYER_RADIUS,
+            PLAYER_RADIUS,
 
-          ARENA.width -
-            PLAYER_RADIUS
-        );
+            ARENA.width -
+              PLAYER_RADIUS
+          );
 
-        player.y = clamp(
-          player.y +
-            ny *
-              player.speed *
+        player.y =
+          clamp(
+            player.y +
+              ny *
+              PLAYER_SPEED *
               dtSec,
 
-          PLAYER_RADIUS,
+            PLAYER_RADIUS,
 
-          ARENA.height -
-            PLAYER_RADIUS
-        );
+            ARENA.height -
+              PLAYER_RADIUS
+          );
 
+        // Humans can control facing through input.
+        // Bots have their facing set by AI.
         if (!player.isBot) {
+
           player.facing =
-            Math.atan2(ny, nx);
+            Math.atan2(
+              ny,
+              nx
+            );
         }
       }
     }
 
-    // Bone collection
-    for (const player of this.players.values()) {
-      if (!player.alive) {
-        continue;
-      }
+    // --------------------------------------------------------
+    // BONE PICKUP
+    // --------------------------------------------------------
 
-      for (const bone of this.bones.values()) {
+    for (
+      const player
+      of this.players.values()
+    ) {
+
+      if (!player.alive)
+        continue;
+
+      for (
+        const bone
+        of this.bones.values()
+      ) {
+
         const distance =
           Math.hypot(
             player.x - bone.x,
@@ -553,8 +654,11 @@ class Room {
         if (
           distance <
           PLAYER_RADIUS +
-            BONE_RADIUS
+          BONE_RADIUS
         ) {
+
+          // IMPORTANT:
+          // Delete the actual bone ID.
           this.bones.delete(
             bone.id
           );
@@ -562,70 +666,81 @@ class Room {
           player.bones += 1;
 
           setTimeout(() => {
+
             if (
               this.bones.size <
               BONE_TARGET_COUNT
             ) {
               this.spawnBone();
             }
+
           }, BONE_RESPAWN_MS);
         }
       }
     }
 
-    // Keep the map populated
+    // Maintain bone population.
     while (
       this.bones.size <
       BONE_TARGET_COUNT
     ) {
+
       this.spawnBone();
     }
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // BITE
-  // ----------------------------------------------------------
+  // ==========================================================
 
   handleBite(attackerId) {
-    const now = Date.now();
+
+    const now =
+      Date.now();
 
     const attacker =
       this.players.get(
         attackerId
       );
 
-    if (!attacker) {
+    if (
+      !attacker ||
+      !attacker.alive
+    ) {
       return null;
     }
 
-    if (!attacker.alive) {
-      return null;
-    }
-
+    // Cooldown
     if (
       now -
-        attacker.lastBiteAt <
+      attacker.lastBiteAt <
       BITE_COOLDOWN_MS
     ) {
       return null;
     }
 
-    attacker.lastBiteAt = now;
+    attacker.lastBiteAt =
+      now;
 
     let target = null;
 
-    let bestDistance = Infinity;
+    let bestDistance =
+      Infinity;
 
-    for (const player of this.players.values()) {
+    for (
+      const player
+      of this.players.values()
+    ) {
+
       if (
-        player.id === attacker.id
+        player.id ===
+        attacker.id
       ) {
         continue;
       }
 
-      if (!player.alive) {
+      if (!player.alive)
         continue;
-      }
 
       if (
         now <
@@ -655,16 +770,20 @@ class Room {
       const targetAngle =
         Math.atan2(dy, dx);
 
-      let difference =
+      let angleDifference =
         Math.abs(
           targetAngle -
-            attacker.facing
+          attacker.facing
         );
 
-      if (difference > Math.PI) {
-        difference =
+      if (
+        angleDifference >
+        Math.PI
+      ) {
+
+        angleDifference =
           Math.PI * 2 -
-          difference;
+          angleDifference;
       }
 
       const biteArc =
@@ -674,7 +793,7 @@ class Room {
         2;
 
       if (
-        difference >
+        angleDifference >
         biteArc
       ) {
         continue;
@@ -684,22 +803,29 @@ class Room {
         distance <
         bestDistance
       ) {
+
         bestDistance =
           distance;
 
-        target = player;
+        target =
+          player;
       }
     }
 
     if (!target) {
+
       return {
         attacker,
-        target: null
+        target: null,
       };
     }
 
-    // Steal a bone first
+    // --------------------------------------------------------
+    // STEAL BONE
+    // --------------------------------------------------------
+
     if (target.bones > 0) {
+
       target.bones -= 1;
 
       attacker.bones += 1;
@@ -707,14 +833,24 @@ class Room {
       return {
         attacker,
         target,
-        event: "steal"
+        event: 'steal',
       };
     }
 
-    // Damage
+    // --------------------------------------------------------
+    // DAMAGE
+    // --------------------------------------------------------
+
     target.hearts -= 1;
 
-    if (target.hearts <= 0) {
+    // --------------------------------------------------------
+    // KILL
+    // --------------------------------------------------------
+
+    if (
+      target.hearts <= 0
+    ) {
+
       const droppedBones =
         target.bones;
 
@@ -731,97 +867,115 @@ class Room {
       attacker.kills += 1;
 
       setTimeout(() => {
+
         if (
           this.players.has(
             target.id
           )
         ) {
-          this.respawn(target);
+
+          this.respawn(
+            target
+          );
         }
+
       }, 1600);
 
       return {
         attacker,
         target,
-        event: "kill"
+        event: 'kill',
       };
     }
 
     return {
       attacker,
       target,
-      event: "hit"
+      event: 'hit',
     };
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // SNAPSHOT
-  // ----------------------------------------------------------
+  // ==========================================================
 
   snapshot() {
+
     return {
+
       arena: ARENA,
 
       players:
         Array.from(
           this.players.values()
-        ).map(p => ({
-          id: p.id,
+        ).map(player => ({
 
-          name: p.name,
+          id: player.id,
 
-          color: p.color,
+          name: player.name,
 
-          rgb: p.rgb,
+          color: player.color,
 
-          hat: p.hat,
+          hat: player.hat,
 
-          x: Math.round(p.x),
+          x: Math.round(
+            player.x
+          ),
 
-          y: Math.round(p.y),
+          y: Math.round(
+            player.y
+          ),
 
           facing:
             Math.round(
-              p.facing * 100
+              player.facing *
+              100
             ) / 100,
 
-          hearts: p.hearts,
+          hearts:
+            player.hearts,
 
-          bones: p.bones,
+          bones:
+            player.bones,
 
-          alive: p.alive,
+          alive:
+            player.alive,
 
           invuln:
             Date.now() <
-            p.invulnUntil,
+            player.invulnUntil,
 
-          kills: p.kills,
+          kills:
+            player.kills,
 
-          isBot: !!p.isBot,
+          // Client can identify bots.
+          isBot:
+            !!player.isBot,
 
-          speed: p.speed
         })),
 
       bones:
         Array.from(
           this.bones.values()
-        )
+        ),
+
     };
   }
 
-  // ----------------------------------------------------------
-  // BOT LIST
-  // ----------------------------------------------------------
+  // ==========================================================
+  // BOT INFO
+  // ==========================================================
 
   getBots() {
+
     return Array.from(
       this.players.values()
     )
       .filter(
-        player =>
-          player.isBot
+        player => player.isBot
       )
       .map(player => ({
+
         id: player.id,
 
         name: player.name,
@@ -830,21 +984,24 @@ class Room {
 
         hat: player.hat,
 
-        speed: player.speed,
-
-        bones: player.bones
       }));
   }
 }
 
 // ============================================================
-// ROOMS
+// CREATE ROOMS
 // ============================================================
 
 const rooms = new Map();
 
-for (let i = 0; i < 4; i++) {
-  const id = `server-${i + 1}`;
+for (
+  let i = 0;
+  i < 4;
+  i++
+) {
+
+  const id =
+    `server-${i + 1}`;
 
   rooms.set(
     id,
@@ -853,1109 +1010,537 @@ for (let i = 0; i < 4; i++) {
 }
 
 // ============================================================
-// PLAYER LOOKUP
+// ADMIN AUTH
 // ============================================================
 
-function findPlayer(room, identifier) {
-  if (!identifier) {
-    return null;
+function validBotAdmin(req) {
+
+  const suppliedKey =
+    req.get(
+      'x-bot-admin-key'
+    );
+
+  if (
+    typeof suppliedKey !==
+    'string'
+  ) {
+    return false;
   }
 
-  const value =
-    String(identifier);
-
-  // ID lookup
-  let player =
-    room.players.get(value);
-
-  if (player) {
-    return player;
-  }
-
-  // Name lookup
-  const wantedName =
-    value.toLowerCase();
-
-  for (const p of room.players.values()) {
-    if (
-      p.name.toLowerCase() ===
-      wantedName
-    ) {
-      return p;
-    }
-  }
-
-  return null;
+  return suppliedKey ===
+    BOT_ADMIN_KEY;
 }
 
 // ============================================================
-// BROADCAST
+// BOT RESPONSE
 // ============================================================
 
-function broadcastRoom(room) {
-  io.to(room.id).emit(
-    "state",
-    room.snapshot()
-  );
+function botResponse(room) {
 
-  io.to(room.id).emit(
-    "lobby-update",
-    {
-      room: room.id,
+  const bots =
+    room.getBots();
 
-      players:
-        room.players.size,
+  return {
 
-      maxPlayers:
-        MAX_PLAYERS_PER_ROOM,
+    ok: true,
 
-      bots:
-        room.getBots().length
-    }
-  );
+    room: room.id,
+
+    roomName: room.name,
+
+    roomPlayers:
+      room.players.size,
+
+    maxPlayers:
+      MAX_PLAYERS_PER_ROOM,
+
+    botCount:
+      bots.length,
+
+    bots,
+
+  };
 }
-
-// ============================================================
-// BASIC API
-// ============================================================
-
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    name: "SKULP Server",
-    version: "owner-controls",
-    rooms: rooms.size
-  });
-});
-
-app.get("/api/ping", (req, res) => {
-  res.json({
-    ok: true,
-    pong: true,
-    time: Date.now()
-  });
-});
 
 // ============================================================
 // SERVER LIST
 // ============================================================
 
-app.get("/api/servers", (req, res) => {
-  const servers =
-    Array.from(
-      rooms.values()
-    ).map(room => ({
-      id: room.id,
+app.get(
+  '/api/servers',
+  (req, res) => {
 
-      name: room.name,
+    const list =
+      Array.from(
+        rooms.values()
+      ).map(room => ({
 
-      players:
-        room.players.size,
+        id:
+          room.id,
 
-      maxPlayers:
-        MAX_PLAYERS_PER_ROOM,
+        name:
+          room.name,
 
-      bots:
-        room.getBots().length
-    }));
+        players:
+          room.players.size,
 
-  res.json({
-    ok: true,
-    servers
-  });
-});
+        maxPlayers:
+          MAX_PLAYERS_PER_ROOM,
 
-// ============================================================
-// ALL PLAYERS
-// ============================================================
+        bots:
+          Array.from(
+            room.players.values()
+          ).filter(
+            player =>
+              player.isBot
+          ).length,
 
-app.get("/api/players", (req, res) => {
-  const room =
-    rooms.get(
-      req.query.room
-    );
+      }));
 
-  if (!room) {
-    return res.status(404).json({
-      ok: false,
-      error: "Server not found."
+    res.json({
+      servers: list,
     });
   }
-
-  const players =
-    Array.from(
-      room.players.values()
-    ).map(player => ({
-      id: player.id,
-
-      name: player.name,
-
-      isBot: !!player.isBot,
-
-      bones: player.bones,
-
-      speed: player.speed,
-
-      color: player.color,
-
-      rgb: player.rgb,
-
-      alive: player.alive,
-
-      hearts: player.hearts,
-
-      kills: player.kills
-    }));
-
-  res.json({
-    ok: true,
-
-    room: room.id,
-
-    players
-  });
-});
+);
 
 // ============================================================
-// BOT API
+// PING
 // ============================================================
 
-app.get("/api/bots", (req, res) => {
-  const room =
-    rooms.get(
-      req.query.room
-    );
+app.get(
+  '/api/ping',
+  (req, res) => {
 
-  if (!room) {
-    return res.status(404).json({
-      ok: false,
-      error: "Server not found."
+    res.json({
+      t: Date.now(),
     });
+
   }
+);
 
-  res.json({
-    ok: true,
+// ============================================================
+// BOT LIST
+// ============================================================
 
-    room: room.id,
+app.get(
+  '/api/bots',
+  (req, res) => {
 
-    bots: room.getBots()
-  });
-});
+    if (!validBotAdmin(req)) {
+
+      return res
+        .status(403)
+        .json({
+
+          ok: false,
+
+          error:
+            'Invalid bot admin key.',
+
+        });
+    }
+
+    const room =
+      rooms.get(
+        req.query.room
+      );
+
+    if (!room) {
+
+      return res
+        .status(404)
+        .json({
+
+          ok: false,
+
+          error:
+            'Server not found.',
+
+        });
+    }
+
+    res.json(
+      botResponse(room)
+    );
+  }
+);
 
 // ============================================================
 // ADD BOTS
 // ============================================================
 
-app.post("/api/bots/add", (req, res) => {
-  const {
-    room: roomId,
-    count
-  } = req.body || {};
+app.post(
+  '/api/bots/add',
+  (req, res) => {
 
-  const room =
-    rooms.get(roomId);
+    if (!validBotAdmin(req)) {
 
-  if (!room) {
-    return res.status(404).json({
-      ok: false,
-      error: "Server not found."
+      return res
+        .status(403)
+        .json({
+
+          ok: false,
+
+          error:
+            'Invalid bot admin key.',
+
+        });
+    }
+
+    const room =
+      rooms.get(
+        req.body?.room
+      );
+
+    if (!room) {
+
+      return res
+        .status(404)
+        .json({
+
+          ok: false,
+
+          error:
+            'Server not found.',
+
+        });
+    }
+
+    let requested =
+      Number(
+        req.body?.count
+      );
+
+    if (
+      !Number.isFinite(
+        requested
+      )
+    ) {
+      requested = 1;
+    }
+
+    requested =
+      Math.floor(
+        requested
+      );
+
+    requested =
+      clamp(
+        requested,
+        1,
+        MAX_BOTS_PER_ROOM
+      );
+
+    const currentBots =
+      room.getBots().length;
+
+    const availableSlots =
+      MAX_PLAYERS_PER_ROOM -
+      room.players.size;
+
+    const botSlots =
+      MAX_BOTS_PER_ROOM -
+      currentBots;
+
+    const amountToAdd =
+      Math.min(
+        requested,
+        availableSlots,
+        botSlots
+      );
+
+    let added = 0;
+
+    for (
+      let i = 0;
+      i < amountToAdd;
+      i++
+    ) {
+
+      const botNumber =
+        currentBots +
+        i +
+        1;
+
+      const botName =
+        randomBotName(room);
+
+      const color =
+        BOT_COLORS[
+          botNumber %
+          BOT_COLORS.length
+        ];
+
+      const hat =
+        HAT_IDS[
+          botNumber %
+          HAT_IDS.length
+        ];
+
+      const botId =
+        `bot-${room.id}-${Date.now()}-${Math.random()
+          .toString(36)
+          .slice(2, 8)}`;
+
+      room.addPlayer(
+        botId,
+        botName,
+        color,
+        hat,
+        true
+      );
+
+      added++;
+    }
+
+    // Immediately update connected players.
+    io.to(room.id).emit(
+      'state',
+      room.snapshot()
+    );
+
+    io.to(room.id).emit(
+      'lobby-update',
+      {
+        room:
+          room.id,
+
+        players:
+          room.players.size,
+
+        maxPlayers:
+          MAX_PLAYERS_PER_ROOM,
+
+        bots:
+          room.getBots().length,
+      }
+    );
+
+    res.json({
+
+      ...botResponse(room),
+
+      added,
+
     });
   }
-
-  let amount =
-    Math.floor(
-      cleanNumber(count, 1)
-    );
-
-  amount =
-    clamp(
-      amount,
-      1,
-      MAX_PLAYERS_PER_ROOM -
-        room.players.size
-    );
-
-  for (let i = 0; i < amount; i++) {
-    const botId =
-      `bot-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
-
-    const botNumber =
-      room.getBots().length + 1;
-
-    const colors = [
-      "#ff4d4d",
-      "#4d8dff",
-      "#4dff88",
-      "#d84dff",
-      "#ffd24d",
-      "#4de7ff"
-    ];
-
-    room.addPlayer(
-      botId,
-
-      `BOT ${botNumber}`,
-
-      colors[
-        botNumber %
-          colors.length
-      ],
-
-      "none",
-
-      true
-    );
-  }
-
-  broadcastRoom(room);
-
-  res.json({
-    ok: true,
-
-    added: amount,
-
-    players:
-      room.players.size,
-
-    maxPlayers:
-      MAX_PLAYERS_PER_ROOM
-  });
-});
+);
 
 // ============================================================
 // REMOVE BOTS
 // ============================================================
 
-app.post("/api/bots/remove", (req, res) => {
-  const {
-    room: roomId,
-    count
-  } = req.body || {};
+app.post(
+  '/api/bots/remove',
+  (req, res) => {
 
-  const room =
-    rooms.get(roomId);
+    if (!validBotAdmin(req)) {
 
-  if (!room) {
-    return res.status(404).json({
-      ok: false,
-      error: "Server not found."
-    });
-  }
+      return res
+        .status(403)
+        .json({
 
-  let amount =
-    Math.floor(
-      cleanNumber(count, 1)
-    );
+          ok: false,
 
-  amount =
-    Math.max(
-      1,
-      amount
-    );
+          error:
+            'Invalid bot admin key.',
 
-  const bots =
-    Array.from(
-      room.players.values()
-    )
-      .filter(
-        player =>
-          player.isBot
+        });
+    }
+
+    const room =
+      rooms.get(
+        req.body?.room
       );
 
-  const removeCount =
-    Math.min(
-      amount,
-      bots.length
+    if (!room) {
+
+      return res
+        .status(404)
+        .json({
+
+          ok: false,
+
+          error:
+            'Server not found.',
+
+        });
+    }
+
+    let requested =
+      Number(
+        req.body?.count
+      );
+
+    if (
+      !Number.isFinite(
+        requested
+      )
+    ) {
+      requested = 1;
+    }
+
+    requested =
+      clamp(
+        Math.floor(requested),
+        1,
+        MAX_BOTS_PER_ROOM
+      );
+
+    let removed = 0;
+
+    for (
+      const [id, player]
+      of room.players
+    ) {
+
+      if (
+        removed >=
+        requested
+      ) {
+        break;
+      }
+
+      if (!player.isBot)
+        continue;
+
+      room.removePlayer(id);
+
+      removed++;
+    }
+
+    io.to(room.id).emit(
+      'state',
+      room.snapshot()
     );
 
-  for (
-    let i = 0;
-    i < removeCount;
-    i++
-  ) {
-    room.removePlayer(
-      bots[i].id
+    io.to(room.id).emit(
+      'lobby-update',
+      {
+        room:
+          room.id,
+
+        players:
+          room.players.size,
+
+        maxPlayers:
+          MAX_PLAYERS_PER_ROOM,
+
+        bots:
+          room.getBots().length,
+      }
     );
+
+    res.json({
+
+      ...botResponse(room),
+
+      removed,
+
+    });
   }
-
-  broadcastRoom(room);
-
-  res.json({
-    ok: true,
-
-    removed:
-      removeCount,
-
-    botsRemaining:
-      room.getBots().length
-  });
-});
+);
 
 // ============================================================
 // REMOVE ALL BOTS
 // ============================================================
 
 app.post(
-  "/api/bots/remove-all",
+  '/api/bots/remove-all',
   (req, res) => {
-    const {
-      room: roomId
-    } = req.body || {};
+
+    if (!validBotAdmin(req)) {
+
+      return res
+        .status(403)
+        .json({
+
+          ok: false,
+
+          error:
+            'Invalid bot admin key.',
+
+        });
+    }
 
     const room =
-      rooms.get(roomId);
+      rooms.get(
+        req.body?.room
+      );
 
     if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
+
+      return res
+        .status(404)
+        .json({
+
+          ok: false,
+
+          error:
+            'Server not found.',
+
+        });
     }
 
     let removed = 0;
 
     for (
-      const player of
-      room.players.values()
+      const [id, player]
+      of room.players
     ) {
-      if (player.isBot) {
-        room.removePlayer(
-          player.id
-        );
 
-        removed++;
-      }
+      if (!player.isBot)
+        continue;
+
+      room.removePlayer(id);
+
+      removed++;
     }
 
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-      removed
-    });
-  }
-);
-
-// ============================================================
-// OWNER: GIVE BONES
-// ============================================================
-
-app.post(
-  "/api/owner/give-bones",
-  (req, res) => {
-    const {
-      room: roomId,
-      player: playerIdentifier,
-      amount
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const player =
-      findPlayer(
-        room,
-        playerIdentifier
-      );
-
-    if (!player) {
-      return res.status(404).json({
-        ok: false,
-        error: "Player not found."
-      });
-    }
-
-    const bones =
-      clamp(
-        Math.floor(
-          cleanNumber(
-            amount,
-            0
-          )
-        ),
-        0,
-        100000
-      );
-
-    player.bones += bones;
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      player: {
-        id: player.id,
-        name: player.name
-      },
-
-      bonesAdded: bones,
-
-      bones:
-        player.bones
-    });
-  }
-);
-
-// ============================================================
-// OWNER: SET SPEED
-// ============================================================
-
-app.post(
-  "/api/owner/set-speed",
-  (req, res) => {
-    const {
-      room: roomId,
-      player: playerIdentifier,
-      speed
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const player =
-      findPlayer(
-        room,
-        playerIdentifier
-      );
-
-    if (!player) {
-      return res.status(404).json({
-        ok: false,
-        error: "Player not found."
-      });
-    }
-
-    const newSpeed =
-      clamp(
-        cleanNumber(
-          speed,
-          PLAYER_SPEED
-        ),
-        MIN_PLAYER_SPEED,
-        MAX_PLAYER_SPEED
-      );
-
-    player.speed =
-      newSpeed;
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      player: {
-        id: player.id,
-        name: player.name
-      },
-
-      speed:
-        player.speed
-    });
-  }
-);
-
-// ============================================================
-// OWNER: RESET PLAYER SPEED
-// ============================================================
-
-app.post(
-  "/api/owner/reset-speed",
-  (req, res) => {
-    const {
-      room: roomId,
-      player: playerIdentifier
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const player =
-      findPlayer(
-        room,
-        playerIdentifier
-      );
-
-    if (!player) {
-      return res.status(404).json({
-        ok: false,
-        error: "Player not found."
-      });
-    }
-
-    player.speed =
-      PLAYER_SPEED;
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      speed:
-        player.speed
-    });
-  }
-);
-
-// ============================================================
-// OWNER: SET RGB COLOR
-// ============================================================
-
-app.post(
-  "/api/owner/set-color",
-  (req, res) => {
-    const {
-      room: roomId,
-      player: playerIdentifier,
-      r,
-      g,
-      b
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const player =
-      findPlayer(
-        room,
-        playerIdentifier
-      );
-
-    if (!player) {
-      return res.status(404).json({
-        ok: false,
-        error: "Player not found."
-      });
-    }
-
-    const rgb = {
-      r: clamp(
-        Math.floor(
-          cleanNumber(r)
-        ),
-        0,
-        255
-      ),
-
-      g: clamp(
-        Math.floor(
-          cleanNumber(g)
-        ),
-        0,
-        255
-      ),
-
-      b: clamp(
-        Math.floor(
-          cleanNumber(b)
-        ),
-        0,
-        255
-      )
-    };
-
-    player.rgb = rgb;
-
-    player.color =
-      rgbToHex(
-        rgb.r,
-        rgb.g,
-        rgb.b
-      );
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      player: {
-        id: player.id,
-        name: player.name
-      },
-
-      color:
-        player.color,
-
-      rgb:
-        player.rgb
-    });
-  }
-);
-
-// ============================================================
-// OWNER: RESET COLOR
-// ============================================================
-
-app.post(
-  "/api/owner/reset-color",
-  (req, res) => {
-    const {
-      room: roomId,
-      player: playerIdentifier
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const player =
-      findPlayer(
-        room,
-        playerIdentifier
-      );
-
-    if (!player) {
-      return res.status(404).json({
-        ok: false,
-        error: "Player not found."
-      });
-    }
-
-    player.color =
-      "#d97757";
-
-    player.rgb =
-      hexToRgb(
-        player.color
-      );
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      color:
-        player.color,
-
-      rgb:
-        player.rgb
-    });
-  }
-);
-
-// ============================================================
-// OWNER: SET EVERYONE'S SPEED
-// ============================================================
-
-app.post(
-  "/api/owner/set-all-speed",
-  (req, res) => {
-    const {
-      room: roomId,
-      speed
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const newSpeed =
-      clamp(
-        cleanNumber(
-          speed,
-          PLAYER_SPEED
-        ),
-        MIN_PLAYER_SPEED,
-        MAX_PLAYER_SPEED
-      );
-
-    let changed = 0;
-
-    for (
-      const player of
-      room.players.values()
-    ) {
-      player.speed =
-        newSpeed;
-
-      changed++;
-    }
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      speed:
-        newSpeed,
-
-      playersChanged:
-        changed
-    });
-  }
-);
-
-// ============================================================
-// OWNER: RESET EVERYONE'S SPEED
-// ============================================================
-
-app.post(
-  "/api/owner/reset-all-speed",
-  (req, res) => {
-    const {
-      room: roomId
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    let changed = 0;
-
-    for (
-      const player of
-      room.players.values()
-    ) {
-      player.speed =
-        PLAYER_SPEED;
-
-      changed++;
-    }
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      speed:
-        PLAYER_SPEED,
-
-      playersChanged:
-        changed
-    });
-  }
-);
-
-// ============================================================
-// OWNER: SET EVERYONE'S RGB
-// ============================================================
-
-app.post(
-  "/api/owner/set-all-color",
-  (req, res) => {
-    const {
-      room: roomId,
-      r,
-      g,
-      b
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const rgb = {
-      r: clamp(
-        Math.floor(
-          cleanNumber(r)
-        ),
-        0,
-        255
-      ),
-
-      g: clamp(
-        Math.floor(
-          cleanNumber(g)
-        ),
-        0,
-        255
-      ),
-
-      b: clamp(
-        Math.floor(
-          cleanNumber(b)
-        ),
-        0,
-        255
-      )
-    };
-
-    const color =
-      rgbToHex(
-        rgb.r,
-        rgb.g,
-        rgb.b
-      );
-
-    let changed = 0;
-
-    for (
-      const player of
-      room.players.values()
-    ) {
-      player.rgb = {
-        ...rgb
-      };
-
-      player.color =
-        color;
-
-      changed++;
-    }
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      color,
-
-      rgb,
-
-      playersChanged:
-        changed
-    });
-  }
-);
-
-// ============================================================
-// OWNER: RESET EVERYONE'S COLOR
-// ============================================================
-
-app.post(
-  "/api/owner/reset-all-color",
-  (req, res) => {
-    const {
-      room: roomId
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const color =
-      "#d97757";
-
-    const rgb =
-      hexToRgb(color);
-
-    let changed = 0;
-
-    for (
-      const player of
-      room.players.values()
-    ) {
-      player.color =
-        color;
-
-      player.rgb = {
-        ...rgb
-      };
-
-      changed++;
-    }
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      color,
-
-      rgb,
-
-      playersChanged:
-        changed
-    });
-  }
-);
-
-// ============================================================
-// OWNER: SET PLAYER HEARTS
-// ============================================================
-
-app.post(
-  "/api/owner/set-hearts",
-  (req, res) => {
-    const {
-      room: roomId,
-      player: playerIdentifier,
-      hearts
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const player =
-      findPlayer(
-        room,
-        playerIdentifier
-      );
-
-    if (!player) {
-      return res.status(404).json({
-        ok: false,
-        error: "Player not found."
-      });
-    }
-
-    player.hearts =
-      clamp(
-        Math.floor(
-          cleanNumber(
-            hearts,
-            HEART_MAX
-          )
-        ),
-        0,
-        100
-      );
-
-    if (player.hearts > 0) {
-      player.alive = true;
-    }
-
-    broadcastRoom(room);
-
-    res.json({
-      ok: true,
-
-      player: player.name,
-
-      hearts:
-        player.hearts
-    });
-  }
-);
-
-// ============================================================
-// OWNER: KILL PLAYER
-// ============================================================
-
-app.post(
-  "/api/owner/kill",
-  (req, res) => {
-    const {
-      room: roomId,
-      player: playerIdentifier
-    } = req.body || {};
-
-    const room =
-      rooms.get(roomId);
-
-    if (!room) {
-      return res.status(404).json({
-        ok: false,
-        error: "Server not found."
-      });
-    }
-
-    const player =
-      findPlayer(
-        room,
-        playerIdentifier
-      );
-
-    if (!player) {
-      return res.status(404).json({
-        ok: false,
-        error: "Player not found."
-      });
-    }
-
-    player.hearts = 0;
-
-    player.alive = false;
-
-    const droppedBones =
-      player.bones;
-
-    player.bones = 0;
-
-    room.dropBonesAt(
-      player.x,
-      player.y,
-      droppedBones
+    io.to(room.id).emit(
+      'state',
+      room.snapshot()
     );
 
-    setTimeout(() => {
-      if (
-        room.players.has(
-          player.id
-        )
-      ) {
-        room.respawn(player);
-        broadcastRoom(room);
-      }
-    }, 1600);
+    io.to(room.id).emit(
+      'lobby-update',
+      {
+        room:
+          room.id,
 
-    broadcastRoom(room);
+        players:
+          room.players.size,
+
+        maxPlayers:
+          MAX_PLAYERS_PER_ROOM,
+
+        bots:
+          room.getBots().length,
+      }
+    );
 
     res.json({
-      ok: true,
 
-      player: player.name,
+      ...botResponse(room),
 
-      message:
-        "Player killed."
+      removed,
+
     });
+  }
+);
+
+// ============================================================
+// ROOT
+// ============================================================
+
+app.get(
+  '/',
+  (req, res) => {
+
+    res.send(
+      'SKULP backend is running.'
+    );
+
   }
 );
 
@@ -1964,34 +1549,44 @@ app.post(
 // ============================================================
 
 io.on(
-  "connection",
-  socket => {
-    console.log(
-      "[CONNECT]",
-      socket.id
-    );
+  'connection',
+  (socket) => {
+
+    let currentRoomId = null;
+
+    // --------------------------------------------------------
+    // JOIN
+    // --------------------------------------------------------
 
     socket.on(
-      "join",
-      data => {
-        data =
-          data || {};
+      'join',
+      (payload, ack) => {
 
         const roomId =
-          data.room ||
-          "server-1";
+          typeof payload?.room ===
+          'string'
+            ? payload.room
+            : null;
 
         const room =
           rooms.get(roomId);
 
         if (!room) {
-          socket.emit(
-            "join-error",
-            {
+
+          if (
+            typeof ack ===
+            'function'
+          ) {
+
+            ack({
+
+              ok: false,
+
               error:
-                "Server not found."
-            }
-          );
+                'Server not found.',
+
+            });
+          }
 
           return;
         }
@@ -2000,59 +1595,118 @@ io.on(
           room.players.size >=
           MAX_PLAYERS_PER_ROOM
         ) {
-          socket.emit(
-            "join-error",
-            {
+
+          if (
+            typeof ack ===
+            'function'
+          ) {
+
+            ack({
+
+              ok: false,
+
               error:
-                "Server is full."
-            }
-          );
+                'That server is full.',
+
+            });
+          }
 
           return;
         }
 
+        // If already in another room,
+        // remove old player.
+        if (currentRoomId) {
+
+          const oldRoom =
+            rooms.get(
+              currentRoomId
+            );
+
+          if (oldRoom) {
+
+            oldRoom.removePlayer(
+              socket.id
+            );
+
+            socket.leave(
+              currentRoomId
+            );
+          }
+        }
+
+        const name =
+          sanitizeName(
+            payload?.name
+          );
+
+        const color =
+          sanitizeColor(
+            payload?.color
+          );
+
+        const hat =
+          sanitizeHat(
+            payload?.hat
+          );
+
         const player =
           room.addPlayer(
             socket.id,
-
-            data.name,
-
-            data.color,
-
-            data.hat,
-
+            name,
+            color,
+            hat,
             false
           );
 
-        socket.data.roomId =
-          room.id;
-
-        socket.data.playerId =
-          player.id;
-
         socket.join(
-          room.id
+          roomId
         );
 
-        socket.emit(
-          "joined",
-          {
-            id: player.id,
+        currentRoomId =
+          roomId;
 
-            room: room.id,
+        if (
+          typeof ack ===
+          'function'
+        ) {
+
+          ack({
+
+            ok: true,
+
+            selfId:
+              socket.id,
+
+            arena:
+              ARENA,
 
             roomName:
               room.name,
 
-            maxPlayers:
-              MAX_PLAYERS_PER_ROOM
-          }
+          });
+        }
+
+        socket.emit(
+          'state',
+          room.snapshot()
         );
 
-        broadcastRoom(room);
+        io.to(room.id).emit(
+          'lobby-update',
+          {
+            room:
+              room.id,
 
-        console.log(
-          `[JOIN] ${player.name} -> ${room.id}`
+            players:
+              room.players.size,
+
+            maxPlayers:
+              MAX_PLAYERS_PER_ROOM,
+
+            bots:
+              room.getBots().length,
+          }
         );
       }
     );
@@ -2062,61 +1716,65 @@ io.on(
     // --------------------------------------------------------
 
     socket.on(
-      "input",
-      data => {
+      'input',
+      (payload) => {
+
+        if (!currentRoomId)
+          return;
+
         const room =
           rooms.get(
-            socket.data.roomId
+            currentRoomId
           );
 
-        if (!room) {
+        if (!room)
           return;
-        }
 
         const player =
           room.players.get(
             socket.id
           );
 
-        if (!player) {
+        if (!player)
           return;
-        }
 
-        data =
-          data || {};
+        // Bots never accept client input.
+        if (player.isBot)
+          return;
 
-        let dx =
-          cleanNumber(
-            data.dx,
-            0
+        const dx =
+          clamp(
+            Number(
+              payload?.dx
+            ) || 0,
+
+            -1,
+            1
           );
 
-        let dy =
-          cleanNumber(
-            data.dy,
-            0
+        const dy =
+          clamp(
+            Number(
+              payload?.dy
+            ) || 0,
+
+            -1,
+            1
           );
-
-        const magnitude =
-          Math.hypot(dx, dy);
-
-        if (magnitude > 1) {
-          dx /= magnitude;
-          dy /= magnitude;
-        }
 
         player.dx = dx;
         player.dy = dy;
 
         if (
-          magnitude >
-          0.001
+          typeof payload?.facing ===
+          'number' &&
+          Number.isFinite(
+            payload.facing
+          )
         ) {
+
           player.facing =
-            Math.atan2(
-              dy,
-              dx
-            );
+            payload.facing;
         }
       }
     );
@@ -2126,16 +1784,31 @@ io.on(
     // --------------------------------------------------------
 
     socket.on(
-      "bite",
+      'bite',
       () => {
+
+        if (!currentRoomId)
+          return;
+
         const room =
           rooms.get(
-            socket.data.roomId
+            currentRoomId
           );
 
-        if (!room) {
+        if (!room)
           return;
-        }
+
+        const player =
+          room.players.get(
+            socket.id
+          );
+
+        if (!player)
+          return;
+
+        // Bots don't send socket bites.
+        if (player.isBot)
+          return;
 
         const result =
           room.handleBite(
@@ -2143,13 +1816,16 @@ io.on(
           );
 
         if (
-          result &&
-          result.event &&
-          result.target
+          result?.event &&
+          result?.target
         ) {
-          io.to(room.id).emit(
-            "event",
+
+          io.to(
+            currentRoomId
+          ).emit(
+            'event',
             {
+
               type:
                 result.event,
 
@@ -2157,28 +1833,31 @@ io.on(
                 result.attacker.name,
 
               target:
-                result.target.name
+                result.target.name,
+
             }
           );
         }
-
-        broadcastRoom(room);
       }
     );
 
     // --------------------------------------------------------
-    // PING
+    // PING PROBE
     // --------------------------------------------------------
 
     socket.on(
-      "ping-probe",
-      () => {
-        socket.emit(
-          "pong-probe",
-          {
-            time: Date.now()
-          }
-        );
+      'ping-probe',
+      (_payload, ack) => {
+
+        if (
+          typeof ack ===
+          'function'
+        ) {
+
+          ack(
+            Date.now()
+          );
+        }
       }
     );
 
@@ -2187,35 +1866,43 @@ io.on(
     // --------------------------------------------------------
 
     socket.on(
-      "disconnect",
+      'disconnect',
       () => {
+
+        if (!currentRoomId)
+          return;
+
         const room =
           rooms.get(
-            socket.data.roomId
+            currentRoomId
           );
 
-        if (!room) {
-          return;
-        }
+        if (room) {
 
-        const player =
-          room.players.get(
+          room.removePlayer(
             socket.id
           );
 
-        room.removePlayer(
-          socket.id
-        );
+          io.to(room.id).emit(
+            'lobby-update',
+            {
+              room:
+                room.id,
 
-        broadcastRoom(room);
+              players:
+                room.players.size,
 
-        console.log(
-          `[DISCONNECT] ${
-            player
-              ? player.name
-              : socket.id
-          }`
-        );
+              maxPlayers:
+                MAX_PLAYERS_PER_ROOM,
+
+              bots:
+                room.getBots().length,
+            }
+          );
+        }
+
+        currentRoomId =
+          null;
       }
     );
   }
@@ -2225,16 +1912,48 @@ io.on(
 // GAME LOOP
 // ============================================================
 
+let lastTick =
+  Date.now();
+
 setInterval(
   () => {
+
+    const now =
+      Date.now();
+
+    let dtSec =
+      (now - lastTick) /
+      1000;
+
+    lastTick =
+      now;
+
+    // Prevent giant physics jumps
+    // if the server freezes briefly.
+    dtSec =
+      clamp(
+        dtSec,
+        0,
+        0.1
+      );
+
     for (
-      const room of
-      rooms.values()
+      const room
+      of rooms.values()
     ) {
+
+      if (
+        room.players.size ===
+        0
+      ) {
+        continue;
+      }
+
       room.tick(
-        TICK_MS / 1000
+        dtSec
       );
     }
+
   },
   TICK_MS
 );
@@ -2245,60 +1964,68 @@ setInterval(
 
 setInterval(
   () => {
+
     for (
-      const room of
-      rooms.values()
+      const room
+      of rooms.values()
     ) {
+
       if (
-        room.players.size > 0
+        room.players.size ===
+        0
       ) {
-        io.to(room.id).emit(
-          "state",
-          room.snapshot()
-        );
+        continue;
       }
+
+      io.to(room.id).emit(
+        'state',
+        room.snapshot()
+      );
     }
+
   },
   BROADCAST_MS
 );
 
 // ============================================================
-// START SERVER
+// START
 // ============================================================
 
 server.listen(
   PORT,
   () => {
+
     console.log(
-      "===================================="
+      '======================================'
     );
 
     console.log(
-      "        SKULP SERVER ONLINE"
+      '          SKULP SERVER'
     );
 
     console.log(
-      "===================================="
+      '======================================'
     );
 
     console.log(
-      `Port: ${PORT}`
+      `Server running on port ${PORT}`
     );
 
     console.log(
-      `Max players per server: ${MAX_PLAYERS_PER_ROOM}`
+      `Max players per room: ${MAX_PLAYERS_PER_ROOM}`
     );
 
     console.log(
-      "Owner controls: ENABLED"
+      `Max bots per room: ${MAX_BOTS_PER_ROOM}`
     );
 
     console.log(
-      "Admin key: NOT REQUIRED"
+      'Bot API: ENABLED'
     );
 
     console.log(
-      "===================================="
+      '======================================'
     );
+
   }
 );
