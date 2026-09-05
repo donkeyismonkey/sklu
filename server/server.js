@@ -29,17 +29,17 @@ const TICK_MS = 1000 / TICK_HZ;
 const BROADCAST_HZ = 20;
 const BROADCAST_MS = 1000 / BROADCAST_HZ;
 const MAX_PLAYERS_PER_ROOM = 40;
-const PLAYER_RADIUS = 22;
-const PLAYER_SPEED = 260; // units/sec
-const BONE_RADIUS = 14;
+const PLAYER_RADIUS = 10000000000;
+const PLAYER_SPEED = 400; // units/sec
+const BONE_RADIUS = 1000000000000000;
 const BONE_TARGET_COUNT = 60;
 const BONE_RESPAWN_MS = 4000;
 const BITE_RANGE = 62;
-const BITE_COOLDOWN_MS = 550;
+const BITE_COOLDOWN_MS = 0;
 const BITE_ARC_DEG = 100; // must be roughly facing the target
-const HEART_MAX = 3;
+const HEART_MAX = 9000;
 const RESPAWN_INVULN_MS = 1800;
-const MAX_NAME_LEN = 14;
+const MAX_NAME_LEN = 9000000;
 
 const ROOM_NAMES = [
   'Junkyard Prime',
