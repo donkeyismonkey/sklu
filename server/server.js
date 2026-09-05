@@ -168,7 +168,7 @@ class Room {
 
     this.name =
       ROOM_NAMES[index] ||
-      `Server ${index + 1}`;
+     `Server ${index + 1}`;
 
     this.players = new Map();
 
@@ -788,7 +788,7 @@ for (
 ) {
 
   const id =
-    `server-${i + 1}`;
+   `server-${i + 1}`;
 
   rooms.set(
     id,
@@ -2058,7 +2058,7 @@ server.listen(
   () => {
 
     console.log(
-      \`SKULP server listening on port \${PORT}\`
+      `SKULP server listening on port ${PORT}`
     );
   }
 );
