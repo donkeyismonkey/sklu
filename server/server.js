@@ -1,19 +1,24 @@
 // SKULP multiplayer server
-// Authoritative simulation: drifty movement, bone pickup, automatic contact
-// stealing/biting, hearts, death, respawn, plus anti-cheat enforcement.
+// Authoritative simulation: drifty movement, bone pickup/stealing, hearts,
+// death, respawn, upgrade pickups, bush hiding, plus anti-cheat enforcement.
 // Exposes 4 independent "servers" (rooms) on one process, plus a small HTTP
-// API the client's server browser uses to list rooms, player counts, ping.
+// API the client's server browser uses to list rooms, player counts, ping,
+// and a proof-of-work challenge used to gate joining.
 
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const http = require('http');
 const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 4000;
 
-// If you set ALLOWED_ORIGIN (e.g. to your Netlify URL) as an environment
-// variable on your host, only that origin will be allowed to connect from a
-// browser. Left as '*' by default so this works out of the box.
+// Bump this on every server deploy. Visit your backend's root URL in a
+// browser to see this - if it doesn't match what you just pushed, Render
+// is still running an old build, full stop, before anything else is
+// investigated.
+const SERVER_VERSION = '2026.09.05-3';
+
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 
 const app = express();
@@ -30,7 +35,7 @@ const io = new Server(server, {
 // Config
 // ---------------------------------------------------------------------------
 
-const ARENA = { width: 6000, height: 6000 };
+const ARENA = { width: 9000, height: 9000 };
 const TICK_HZ = 30;
 const TICK_MS = 1000 / TICK_HZ;
 const BROADCAST_HZ = 20;
@@ -38,17 +43,13 @@ const BROADCAST_MS = 1000 / BROADCAST_HZ;
 const MAX_PLAYERS_PER_ROOM = 40;
 const PLAYER_RADIUS = 22;
 
-// Drift movement: players accelerate toward their input direction and slide
-// when they let off, instead of snapping straight to a target velocity.
-// Since the server owns these constants and the client only ever sends a
-// direction vector (not a speed), there is no message a modified client can
-// send that makes a player move faster than MAX_SPEED allows.
 const ACCEL = 1400; // units/sec^2
-const MAX_SPEED = 320; // units/sec
+const BASE_MAX_SPEED = 320; // units/sec
+const SPEED_BOOST_MULTIPLIER = 1.6;
 const DRIFT_DECAY_PER_SEC = 0.055;
 
 const BONE_RADIUS = 14;
-const BONE_TARGET_COUNT = 180;
+const BONE_TARGET_COUNT = 260;
 const BONE_RESPAWN_MS = 4000;
 
 const BITE_RANGE = 62;
@@ -66,11 +67,12 @@ const ROOM_NAMES = [
   'Alley Howl',
 ];
 
-const HAT_IDS = ['none', 'party', 'crown', 'bandana', 'halo', 'tinfoil'];
+// Cosmetics offered client-side - kept in sync with client/js/sprites.js.
+const HAT_IDS = [
+  'none', 'party', 'crown', 'bandana', 'halo', 'tinfoil',
+  'sunglasses', 'mohawk', 'wizard', 'viking',
+];
 
-// Only these exact hex values (the swatches offered in the Decorations
-// screen) are accepted as a coat color. Anything else - a custom/edited hex
-// value sent by a modified client - gets the connection rejected outright.
 const APPROVED_COLORS = new Set([
   '#d97757', '#4a90d9', '#5fbf6f', '#c23b3b', '#e8a33d',
   '#8e6bb5', '#3a3a3a', '#efe6d4', '#2f3fd9', '#d93fa0',
@@ -80,33 +82,45 @@ const APPROVED_COLORS = new Set([
 // Anti-cheat thresholds
 // ---------------------------------------------------------------------------
 
-// "Give yourself bones" patch: a legitimate player physically can't pick up
-// more than a handful of bones in a few seconds given movement speed and
-// bone spacing. If a player's pickup rate blows past this, it's either a
-// packet-replay/speed exploit or a modified client granting bones directly -
-// either way, they're removed.
+// Raised from earlier, tighter values after real-world testing showed
+// legitimate players occasionally scooping several bones at once near a
+// death-drop cluster (a dead player's bones scatter close together) could
+// trip an overly aggressive limit. These stay far below anything a real
+// exploit would produce while giving normal play real headroom.
 const BONE_CHEAT_WINDOW_MS = 3000;
-const BONE_CHEAT_MAX = 7;
+const BONE_CHEAT_MAX = 18;
+const BONE_CHEAT_SINGLE_TICK_MAX = 8;
 
-// Generic flood guard on movement input packets. The real client sends ~20/
-// sec; this allows a generous buffer above that before treating it as a
-// modified client hammering the socket.
 const INPUT_FLOOD_WINDOW_MS = 1000;
-const INPUT_FLOOD_MAX = 60;
+const INPUT_FLOOD_MAX = 100;
 
-// Basic per-IP join throttle to blunt "spin up dozens of bot connections to
-// fill a server" attempts. Honest limitation: players behind the same NAT/
-// shared IP (school, office, some mobile carriers) share this budget too, so
-// it's deliberately generous rather than a hard wall.
 const JOIN_WINDOW_MS = 30000;
 const JOIN_MAX_PER_IP = 8;
 const joinTimestampsByIp = new Map();
 
-// Anyone kicked for an anti-cheat violation has their IP temporarily
-// blocked from reconnecting at all, closing the "get kicked, immediately
-// reconnect, keep farming" loophole.
-const CHEAT_BAN_MS = 10 * 60 * 1000; // 10 minutes
+// IMPORTANT FIX: a single kick no longer bans an IP outright - that's what
+// caused legitimate players to get banned over one false positive or over
+// sharing a network with someone else entirely. An IP is only banned after
+// repeated violations in a short window, which is what an actual bot/cheat
+// script does and a normal player essentially never does by accident.
+const CHEAT_BAN_MS = 10 * 60 * 1000;
+const CHEAT_STRIKES_BEFORE_BAN = 3;
+const CHEAT_STRIKE_WINDOW_MS = 5 * 60 * 1000;
+const cheatStrikesByIp = new Map(); // ip -> [timestamps]
 const bannedIpsUntil = new Map();
+
+// Proof-of-work join gate: before joining, the client must fetch a
+// short-lived challenge and find a nonce whose SHA-256 hash (challenge +
+// nonce) starts with DIFFICULTY_PREFIX. This costs real, unavoidable CPU
+// time per join attempt - trivial for one real player, but adds real,
+// scaling cost to spinning up many bot connections quickly. It's not full
+// user accounts (this project has none), but it's a genuine, working cost
+// gate that a page-injected mod menu still has to pay for every bot it
+// spawns, because the server verifies the solution itself.
+const POW_DIFFICULTY_PREFIX = '0000';
+const POW_CHALLENGE_TTL_MS = 30000;
+const pendingChallenges = new Map(); // challenge -> expiry timestamp
+const usedChallenges = new Set();
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
@@ -149,31 +163,110 @@ function isIpBanned(ip) {
   return typeof until === 'number' && Date.now() < until;
 }
 
-function banIp(ip) {
-  bannedIpsUntil.set(ip, Date.now() + CHEAT_BAN_MS);
+// A "strike" is a single anti-cheat kick. Only after several strikes from
+// the same IP in a short window does that IP actually get banned.
+function recordStrikeAndMaybeBan(ip) {
+  const now = Date.now();
+  const arr = (cheatStrikesByIp.get(ip) || []).filter((t) => now - t <= CHEAT_STRIKE_WINDOW_MS);
+  arr.push(now);
+  cheatStrikesByIp.set(ip, arr);
+  if (arr.length >= CHEAT_STRIKES_BEFORE_BAN) {
+    bannedIpsUntil.set(ip, now + CHEAT_BAN_MS);
+    return true;
+  }
+  return false;
 }
 
 function kickSocket(socket, room, reason) {
   const ip = getClientIp(socket);
-  banIp(ip);
-  console.log(`[anti-cheat] kicking ${socket.id} (${ip}) from ${room ? room.id : '?'}: ${reason} - banned for ${CHEAT_BAN_MS / 60000}min`);
+  const banned = recordStrikeAndMaybeBan(ip);
+  console.log(
+    `[anti-cheat] kicking ${socket.id} (${ip}) from ${room ? room.id : '?'}: ${reason}` +
+      (banned ? ` - IP banned ${CHEAT_BAN_MS / 60000}min after repeated strikes` : ' - strike recorded')
+  );
   socket.emit('kicked', { reason: 'Removed for suspicious activity.' });
   if (room) room.removePlayer(socket.id);
   socket.disconnect(true);
 }
 
 // ---------------------------------------------------------------------------
+// Proof-of-work challenge helpers
+// ---------------------------------------------------------------------------
+
+function issueChallenge() {
+  const challenge = crypto.randomBytes(16).toString('hex');
+  pendingChallenges.set(challenge, Date.now() + POW_CHALLENGE_TTL_MS);
+  return challenge;
+}
+
+function verifyChallenge(challenge, nonce) {
+  if (typeof challenge !== 'string' || typeof nonce !== 'string') return false;
+  const expiry = pendingChallenges.get(challenge);
+  if (!expiry || Date.now() > expiry) return false;
+  if (usedChallenges.has(challenge)) return false;
+
+  const hash = crypto.createHash('sha256').update(challenge + nonce).digest('hex');
+  if (!hash.startsWith(POW_DIFFICULTY_PREFIX)) return false;
+
+  usedChallenges.add(challenge);
+  pendingChallenges.delete(challenge);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Static bush hiding spots (fixed zones, same across restarts)
+// ---------------------------------------------------------------------------
+
+function buildBushZones() {
+  const zones = [];
+  const cols = 6;
+  const rows = 6;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      // Skip some cells for a less uniform layout, and jitter placement.
+      if ((r + c) % 3 === 0) continue;
+      const cellW = ARENA.width / cols;
+      const cellH = ARENA.height / rows;
+      zones.push({
+        x: cellW * (c + 0.5) + randRange(-cellW * 0.2, cellW * 0.2),
+        y: cellH * (r + 0.5) + randRange(-cellH * 0.2, cellH * 0.2),
+        radius: randRange(140, 220),
+      });
+    }
+  }
+  return zones;
+}
+
+const BUSH_ZONES = buildBushZones();
+
+function isInBush(x, y) {
+  for (const b of BUSH_ZONES) {
+    if (Math.hypot(x - b.x, y - b.y) < b.radius) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Room / game state
 // ---------------------------------------------------------------------------
+
+const UPGRADE_TYPES = ['speed', 'shield', 'heart'];
+const UPGRADE_TARGET_COUNT = 14;
+const UPGRADE_RESPAWN_MS = 12000;
+const SPEED_BOOST_DURATION_MS = 8000;
+const SHIELD_DURATION_MS = 5000;
 
 class Room {
   constructor(id, index) {
     this.id = id;
     this.name = ROOM_NAMES[index] || `Server ${index + 1}`;
-    this.players = new Map(); // socket.id -> player
-    this.bones = new Map(); // bone.id -> bone
+    this.players = new Map();
+    this.bones = new Map();
+    this.upgrades = new Map();
     this.nextBoneId = 1;
+    this.nextUpgradeId = 1;
     for (let i = 0; i < BONE_TARGET_COUNT; i++) this.spawnBone();
+    for (let i = 0; i < UPGRADE_TARGET_COUNT; i++) this.spawnUpgrade();
   }
 
   spawnBone() {
@@ -185,6 +278,19 @@ class Room {
     };
     this.bones.set(id, bone);
     return bone;
+  }
+
+  spawnUpgrade() {
+    const id = 'u' + this.nextUpgradeId++;
+    const type = UPGRADE_TYPES[Math.floor(Math.random() * UPGRADE_TYPES.length)];
+    const upgrade = {
+      id,
+      type,
+      x: randRange(200, ARENA.width - 200),
+      y: randRange(200, ARENA.height - 200),
+    };
+    this.upgrades.set(id, upgrade);
+    return upgrade;
   }
 
   addPlayer(socketId, name, color, hat) {
@@ -199,15 +305,18 @@ class Room {
       vy: 0,
       dx: 0,
       dy: 0,
-      facing: 0, // radians
+      facing: 0,
       hearts: HEART_MAX,
       bones: 0,
       alive: true,
       lastBiteAt: 0,
       invulnUntil: Date.now() + RESPAWN_INVULN_MS,
       kills: 0,
-      boneTimestamps: [], // anti-cheat: rolling pickup-rate window
-      inputTimestamps: [], // anti-cheat: rolling input-flood window
+      speedBoostUntil: 0,
+      shieldUntil: 0,
+      inBush: false,
+      boneTimestamps: [],
+      inputTimestamps: [],
     };
     this.players.set(socketId, player);
     return player;
@@ -226,6 +335,8 @@ class Room {
     player.bones = 0;
     player.alive = true;
     player.invulnUntil = Date.now() + RESPAWN_INVULN_MS;
+    player.speedBoostUntil = 0;
+    player.shieldUntil = 0;
   }
 
   dropBonesAt(x, y, count) {
@@ -241,25 +352,41 @@ class Room {
     }
   }
 
-  // Returns { events, kicks } - events for chat toasts, kicks for players
-  // the anti-cheat system wants removed this tick.
+  // Central place where ANY bone gain - ground pickup or stealing - is
+  // recorded for the anti-cheat rate check. Earlier versions only tracked
+  // ground pickups, which meant bone gains through stealing were invisible
+  // to the rate limiter entirely - a real gap, now closed.
+  _grantBones(player, amount, kicksOut) {
+    player.bones += amount;
+    const now = Date.now();
+    for (let i = 0; i < amount; i++) player.boneTimestamps.push(now);
+    player.boneTimestamps = player.boneTimestamps.filter((t) => now - t <= BONE_CHEAT_WINDOW_MS);
+    if (player.boneTimestamps.length > BONE_CHEAT_MAX) {
+      kicksOut.push({ id: player.id, reason: 'bone gain rate exceeded' });
+    }
+  }
+
   tick(dtSec) {
     this._moveAndDrift(dtSec);
-    const kicks = this._pickUpBones();
+    const kicks = [];
+    this._pickUpBones(kicks);
+    this._pickUpUpgrades();
+    this._updateBushStatus();
 
-    if (this.bones.size < BONE_TARGET_COUNT / 2) {
-      this.spawnBone();
-    }
+    if (this.bones.size < BONE_TARGET_COUNT / 2) this.spawnBone();
+    if (this.upgrades.size < UPGRADE_TARGET_COUNT / 2) this.spawnUpgrade();
 
-    const events = this._autoBiteSweep();
+    const events = this._autoBiteSweep(kicks);
     return { events, kicks };
   }
 
   _moveAndDrift(dtSec) {
     const decayFactor = Math.max(0, 1 - DRIFT_DECAY_PER_SEC * 60 * dtSec);
+    const now = Date.now();
     for (const p of this.players.values()) {
       if (!p.alive) continue;
       const mag = Math.hypot(p.dx, p.dy);
+      const maxSpeed = now < p.speedBoostUntil ? BASE_MAX_SPEED * SPEED_BOOST_MULTIPLIER : BASE_MAX_SPEED;
 
       if (mag > 0.001) {
         const nx = p.dx / mag;
@@ -273,9 +400,9 @@ class Room {
       }
 
       const speed = Math.hypot(p.vx, p.vy);
-      if (speed > MAX_SPEED) {
-        p.vx = (p.vx / speed) * MAX_SPEED;
-        p.vy = (p.vy / speed) * MAX_SPEED;
+      if (speed > maxSpeed) {
+        p.vx = (p.vx / speed) * maxSpeed;
+        p.vy = (p.vy / speed) * maxSpeed;
       }
 
       let nextX = p.x + p.vx * dtSec;
@@ -287,11 +414,14 @@ class Room {
     }
   }
 
-  _pickUpBones() {
-    const now = Date.now();
-    const kicks = [];
-    const kickedThisPass = new Set();
+  _updateBushStatus() {
+    for (const p of this.players.values()) {
+      p.inBush = p.alive && isInBush(p.x, p.y);
+    }
+  }
 
+  _pickUpBones(kicks) {
+    const kickedThisPass = new Set();
     for (const p of this.players.values()) {
       if (!p.alive || kickedThisPass.has(p.id)) continue;
       let pickedUpThisTick = 0;
@@ -300,38 +430,51 @@ class Room {
         const d = Math.hypot(p.x - bone.x, p.y - bone.y);
         if (d < PLAYER_RADIUS + BONE_RADIUS) {
           this.bones.delete(bone.id);
-          p.bones += 1;
           pickedUpThisTick += 1;
-
-          p.boneTimestamps.push(now);
-          p.boneTimestamps = p.boneTimestamps.filter((t) => now - t <= BONE_CHEAT_WINDOW_MS);
+          this._grantBones(p, 1, kicks);
 
           setTimeout(() => {
             if (this.players.size > 0) this.spawnBone();
           }, BONE_RESPAWN_MS);
 
-          // A legitimate player's hitbox can only ever realistically reach
-          // a bone or two per single server tick given movement speed and
-          // bone spacing. Grabbing a burst far beyond that in one tick is
-          // an instant tell (teleport/hitbox exploit) - don't wait for the
-          // rolling window, kick immediately.
-          if (pickedUpThisTick > 3) {
+          if (pickedUpThisTick > BONE_CHEAT_SINGLE_TICK_MAX) {
             kicks.push({ id: p.id, reason: 'single-tick bone burst' });
             kickedThisPass.add(p.id);
             break;
           }
         }
       }
-
-      if (!kickedThisPass.has(p.id) && p.boneTimestamps.length > BONE_CHEAT_MAX) {
-        kicks.push({ id: p.id, reason: 'bone pickup rate exceeded' });
-        kickedThisPass.add(p.id);
-      }
     }
-    return kicks;
   }
 
-  _autoBiteSweep() {
+  _pickUpUpgrades() {
+    for (const p of this.players.values()) {
+      if (!p.alive) continue;
+      for (const up of this.upgrades.values()) {
+        const d = Math.hypot(p.x - up.x, p.y - up.y);
+        if (d < PLAYER_RADIUS + 18) {
+          this.upgrades.delete(up.id);
+          this._applyUpgrade(p, up.type);
+          setTimeout(() => {
+            if (this.players.size > 0) this.spawnUpgrade();
+          }, UPGRADE_RESPAWN_MS);
+        }
+      }
+    }
+  }
+
+  _applyUpgrade(player, type) {
+    const now = Date.now();
+    if (type === 'speed') {
+      player.speedBoostUntil = now + SPEED_BOOST_DURATION_MS;
+    } else if (type === 'shield') {
+      player.shieldUntil = now + SHIELD_DURATION_MS;
+    } else if (type === 'heart') {
+      player.hearts = HEART_MAX;
+    }
+  }
+
+  _autoBiteSweep(kicks) {
     const now = Date.now();
     const events = [];
 
@@ -344,6 +487,7 @@ class Room {
       for (const p of this.players.values()) {
         if (p.id === attacker.id || !p.alive) continue;
         if (now < p.invulnUntil) continue;
+        if (now < p.shieldUntil) continue;
         const dx = p.x - attacker.x;
         const dy = p.y - attacker.y;
         const dist = Math.hypot(dx, dy);
@@ -363,7 +507,7 @@ class Room {
 
       if (target.bones > 0) {
         target.bones -= 1;
-        attacker.bones += 1;
+        this._grantBones(attacker, 1, kicks);
         events.push({ type: 'steal', attacker: attacker.name, target: target.name });
         continue;
       }
@@ -388,6 +532,7 @@ class Room {
   }
 
   snapshot() {
+    const now = Date.now();
     return {
       arena: ARENA,
       players: Array.from(this.players.values()).map((p) => ({
@@ -401,10 +546,14 @@ class Room {
         hearts: p.hearts,
         bones: p.bones,
         alive: p.alive,
-        invuln: Date.now() < p.invulnUntil,
+        invuln: now < p.invulnUntil,
+        shielded: now < p.shieldUntil,
+        boosted: now < p.speedBoostUntil,
+        inBush: p.inBush,
         kills: p.kills,
       })),
       bones: Array.from(this.bones.values()),
+      upgrades: Array.from(this.upgrades.values()),
     };
   }
 }
@@ -416,7 +565,7 @@ for (let i = 0; i < 4; i++) {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP API - server browser + ping probe
+// HTTP API
 // ---------------------------------------------------------------------------
 
 app.get('/api/servers', (req, res) => {
@@ -433,12 +582,16 @@ app.get('/api/ping', (req, res) => {
   res.json({ t: Date.now() });
 });
 
+app.get('/api/challenge', (req, res) => {
+  res.json({ challenge: issueChallenge(), difficultyPrefix: POW_DIFFICULTY_PREFIX });
+});
+
 app.get('/', (req, res) => {
-  res.send('SKULP backend is running.');
+  res.send(`SKULP backend is running. (version: ${SERVER_VERSION})`);
 });
 
 // ---------------------------------------------------------------------------
-// Socket.io - realtime gameplay
+// Socket.io
 // ---------------------------------------------------------------------------
 
 io.on('connection', (socket) => {
@@ -463,6 +616,15 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (!verifyChallenge(payload?.powChallenge, payload?.powNonce)) {
+      if (typeof ack === 'function') {
+        ack({ ok: false, error: 'Could not verify connection. Please refresh and try again.' });
+      }
+      console.log(`[anti-cheat] rejected join from ${socket.id} (${ip}): failed proof-of-work check`);
+      socket.disconnect(true);
+      return;
+    }
+
     const roomId = typeof payload?.room === 'string' ? payload.room : null;
     const room = rooms.get(roomId);
     if (!room) {
@@ -474,9 +636,6 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Anti-cheat: coat color must be one of the exact approved swatches.
-    // A custom/edited value here means a tampered client - refuse the
-    // connection outright rather than silently correcting it.
     if (!isApprovedColor(payload?.color)) {
       if (typeof ack === 'function') {
         ack({ ok: false, error: 'Invalid cosmetic color detected. Connection refused.' });
@@ -495,7 +654,7 @@ io.on('connection', (socket) => {
     currentRoomId = roomId;
 
     if (typeof ack === 'function') {
-      ack({ ok: true, selfId: socket.id, arena: ARENA, roomName: room.name });
+      ack({ ok: true, selfId: socket.id, arena: ARENA, roomName: room.name, bushes: BUSH_ZONES });
     }
     socket.emit('state', room.snapshot());
   });
@@ -561,7 +720,7 @@ setInterval(() => {
   }
 }, BROADCAST_MS);
 
-// Periodically forget old join-rate history and expired bans so these maps
+// Housekeeping: drop old rate-limit/ban/challenge history so these maps
 // don't grow forever.
 setInterval(() => {
   const now = Date.now();
@@ -570,11 +729,19 @@ setInterval(() => {
     if (fresh.length === 0) joinTimestampsByIp.delete(ip);
     else joinTimestampsByIp.set(ip, fresh);
   }
+  for (const [ip, arr] of cheatStrikesByIp.entries()) {
+    const fresh = arr.filter((t) => now - t <= CHEAT_STRIKE_WINDOW_MS);
+    if (fresh.length === 0) cheatStrikesByIp.delete(ip);
+    else cheatStrikesByIp.set(ip, fresh);
+  }
   for (const [ip, until] of bannedIpsUntil.entries()) {
     if (now >= until) bannedIpsUntil.delete(ip);
+  }
+  for (const [challenge, expiry] of pendingChallenges.entries()) {
+    if (now > expiry) pendingChallenges.delete(challenge);
   }
 }, 60000);
 
 server.listen(PORT, () => {
-  console.log(`SKULP server listening on port ${PORT}`);
+  console.log(`SKULP server listening on port ${PORT} (version ${SERVER_VERSION})`);
 });
